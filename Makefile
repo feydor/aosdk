@@ -24,7 +24,7 @@
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 
-# NOTE: this makefile will auto-detect Linux and MinGW and work appropriately.  Other OSes will likely
+# NOTE: this makefile will auto-detect Linux and MinGW and OSX and work appropriately.  Other OSes will likely
 #       need some help.
 
 CC   ?= gcc
@@ -36,6 +36,16 @@ CFLAGS += -DLSB_FIRST=1
 ifeq ($(OS),Windows_NT)
 	#Windows
 	LDFLAGS += -Wl,--gc-sections
+	CFLAGS += -DWIN32_UTF8_NO_API
+    OBJS += dsnd.o win32_utf8/win32_utf8_build_static.o win32_utf8/entry_main.o
+    LIBS += -ldsound -ldxguid
+    # Windows DLLs referenced by win32_utf8, which are hopefully eliminated by
+    # -gc-sections one day…
+    LIBS += -lcomdlg32 -lgdi32 -lole32 -lpsapi -lshlwapi -lversion -lwininet
+    ifndef NOGUI
+        # Windows OpenGL DLL, referenced by ImGui
+        LIBS += -lopengl32
+    endif
 else
     UNAME_S := $(shell uname -s)
     ifeq ($(UNAME_S),Darwin)
@@ -44,6 +54,18 @@ else
 	else
 		#Linux
 		LDFLAGS += -Wl,--gc-sections
+    endif
+
+    ifeq ($(shell uname -m),x86_64)
+        CFLAGS += -DLONG_IS_64BIT=1
+    endif
+
+    ifneq (,$(wildcard /dev/dsp))
+        $(info Using OSS via /dev/dsp for playback.)
+        OBJS += oss.o
+    else
+        $(info /dev/dsp not found. Using Port Audio.)
+		OBJS += paudio.o
     endif
 endif
 
@@ -54,31 +76,6 @@ LIBS += -lm
 
 # main objects
 OBJS = main.o ao.o corlett.o m1sdr.o utils.o mididump.o sampledump.o wavedump.o argparse/argparse.o
-
-# port objects
-ifeq ($(OSTYPE),linux)
-ifeq ($(shell uname -m),x86_64)
-CFLAGS += -DLONG_IS_64BIT=1
-endif
-ifneq (,$(wildcard /dev/dsp))
-    $(info Using OSS via /dev/dsp for playback.)
-    OBJS += oss.o
-else
-    $(info /dev/dsp not found. Playback will be unavailable.)
-    CFLAGS += -DNOPLAY
-endif
-else
-CFLAGS += -DWIN32_UTF8_NO_API
-OBJS += dsnd.o win32_utf8/win32_utf8_build_static.o win32_utf8/entry_main.o
-LIBS += -ldsound -ldxguid
-# Windows DLLs referenced by win32_utf8, which are hopefully eliminated by
-# -gc-sections one day…
-LIBS += -lcomdlg32 -lgdi32 -lole32 -lpsapi -lshlwapi -lversion -lwininet
-ifndef NOGUI
-# Windows OpenGL DLL, referenced by ImGui
-LIBS += -lopengl32
-endif
-endif
 
 # DSF engine
 OBJS += eng_dsf/eng_dsf.o eng_dsf/dc_hw.o eng_dsf/aica.o eng_dsf/aicadsp.o eng_dsf/arm7.o eng_dsf/arm7i.o
@@ -105,33 +102,49 @@ OBJS += zlib/zutil.o zlib/inflate.o zlib/infback.o zlib/inftrees.o zlib/inffast.
 
 # ImGui
 ifndef NOGUI
-PKG_CONFIG = $(shell which pkg-config 2>/dev/null)
-ifeq ($(PKG_CONFIG),)
-$(error pkg-config not found)
+	PKG_CONFIG = $(shell which pkg-config 2>/dev/null)
+	ifeq ($(PKG_CONFIG),)
+		$(error pkg-config not found)
+	endif
+
+	GLFW3_LIBS = $(shell $(PKG_CONFIG) --static --libs-only-l glfw3 2>/dev/null)
+
+	ifeq ($(GLFW3_LIBS),)
+		$(warning GLFW3 development files not installed, debug GUI can not be built.)
+		$(error To build without the debug GUI, set NOGUI=1 before calling make)
+	endif
+
+	CFLAGS += -Iimgui/ -DIMGUI_INCLUDE_IMGUI_USER_H -DIMGUI_INCLUDE_IMGUI_USER_INL
+	LIBS += $(GLFW3_LIBS) -lstdc++
+
+	OBJS += imgui/imgui.o imgui/imgui_draw.o imgui/imgui_demo.o imgui/examples/opengl_example/imgui_impl_glfw.o
+	OBJS += eng_dsf/dc_debug.o
+	OBJS += debug.o
 endif
 
-GLFW3_LIBS = $(shell $(PKG_CONFIG) --static --libs-only-l glfw3 2>/dev/null)
-
-ifeq ($(GLFW3_LIBS),)
-$(warning GLFW3 development files not installed, debug GUI can not be built.)
-$(error To build without the debug GUI, set NOGUI=1 before calling make)
-endif
-
-CFLAGS += -Iimgui/ -DIMGUI_INCLUDE_IMGUI_USER_H -DIMGUI_INCLUDE_IMGUI_USER_INL
-LIBS += $(GLFW3_LIBS) -lstdc++
-
-OBJS += imgui/imgui.o imgui/imgui_draw.o imgui/imgui_demo.o imgui/examples/opengl_example/imgui_impl_glfw.o
-OBJS += eng_dsf/dc_debug.o
-OBJS += debug.o
-
-ifneq ($(OSTYPE),linux)
-LIBS += -limm32
-endif
+# linking and final options
+ifeq ($(OS),Windows_NT)
+	LIBS += -limm32
 else
-CFLAGS += -DNOGUI
+    CFLAGS += -DNOGUI
+
+    UNAME_S := $(shell uname -s)
+    ifeq ($(UNAME_S),Darwin)
+		#macOS
+		OBJS += paudio.o
+		STATIC_LIBS += libportaudio.a
+		CFLAGS += -Iportaudio/include
+		LDFLAGS += -framework CoreServices -framework CoreFoundation -framework AudioUnit \
+				   -framework AudioToolbox -framework CoreAudio
+	else
+		#Linux
+		LDFLAGS += -Wl,--gc-sections
+    endif
 endif
+
 
 MACHINE_OBJS = $(OBJS:%.o=obj/$(MACHINE)/%.o)
+MACHINE_STATIC_LIBS = $(STATIC_LIBS:%.a=libs/$(MACHINE)/%.a)
 
 all: release
 .PHONY: debug release
@@ -141,6 +154,12 @@ debug: $(EXE)
 
 release: CFLAGS += -O3 -DNDEBUG
 release: $(EXE)
+
+libs/$(MACHINE)/libportaudio.a:
+	@echo Compiling static library libportaudio.a...
+	@mkdir -p $(@D)
+	cd portaudio && ./configure && make
+	cp portaudio/lib/.libs/libportaudio.a libs/$(MACHINE)/libportaudio.a
 
 obj/$(MACHINE)/%.o: %.c
 	@echo Compiling $<...
@@ -152,9 +171,9 @@ obj/$(MACHINE)/%.o: %.cpp
 	@mkdir -p $(@D)
 	@$(CC) -std=c++1y $(CFLAGS) $< -o $@
 
-$(EXE): $(MACHINE_OBJS)
+$(EXE): $(MACHINE_OBJS) $(MACHINE_STATIC_LIBS)
 	@echo Linking $(EXE)...
-	@$(LD) $(LDFLAGS) -g -o $(EXE) $(MACHINE_OBJS) $(LIBS)
+	@$(LD) $(LDFLAGS) -g -o $(EXE) $(MACHINE_OBJS) $(MACHINE_STATIC_LIBS) $(LIBS)
 
 clean:
 	rm -f $(MACHINE_OBJS) $(EXE)
