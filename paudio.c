@@ -5,7 +5,7 @@
  *
  * Author: feydor
  */
- 
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -15,121 +15,182 @@
 #include "m1sdr.h"
 #include "portaudio.h"
 
-#define VALGRIND 	(0)
-
 // local variables
 int nDSoundSegLen = 0; // Seg length in samples (calculated from Rate/Fps)
 static PaStream *stream;
 static PaError err;
 static stereo_sample_t samples[AUDIO_RATE];
-static stereo_sample_t data;
+static int nowait = 0;
 
 
 // set # of samples per update
 void m1sdr_SetSamplesPerTick(UINT32 spf)
 {
-	nDSoundSegLen = spf;
+    nDSoundSegLen = spf;
 }
 
 // m1sdr_Update - timer callback routine: runs sequencer and mixes sound
 void m1sdr_Update(void)
 {
-	if (!hw_present) return;
+    if (!hw_present) return;
 
-	if (m1sdr_Callback)
-	{
-		m1sdr_Callback(nDSoundSegLen, samples);
-	}
+    if (m1sdr_Callback)
+    {
+        m1sdr_Callback(nDSoundSegLen, samples);
+    }
 }
 
-/* This routine will be called by the PortAudio engine when audio is needed.
-** It may called at interrupt level on some machines so don't do anything
-** that could mess up the system like calling malloc() or free().
-*/
-static int patestCallback(const void *inputBuffer, void *outputBuffer,
-                           unsigned long framesPerBuffer,
-                           const PaStreamCallbackTimeInfo* timeInfo,
-                           PaStreamCallbackFlags statusFlags,
-                           void *userData)
-{
-    /* Cast data passed through stream to our structure. */
-    stereo_sample_t *data = (stereo_sample_t*)userData;
-    int16 *out = (int16*)outputBuffer;
-    (void) inputBuffer;
-
-    m1sdr_Update();
-
-    for(unsigned int i=0; i<framesPerBuffer; i++ )
-    {
-        *out++ = samples[i].l;
-        *out++ = samples[i].r;
-    }
-    return 0;
+static void pa_error_handler() {
+    Pa_Terminate();
+    fprintf(stderr, "An error occurred while using the portaudio stream\n");
+    fprintf(stderr, "Error number: %d\n", err);
+    fprintf(stderr, "Error message: %s\n", Pa_GetErrorText(err));
 }
 
 // checks the play position to see if we should trigger another update
 m1sdr_ret_t m1sdr_TimeCheck(void)
 {
-	return M1SDR_WAIT;
+    if (nowait)
+    {
+        m1sdr_Update();
+
+        err = Pa_WriteStream(stream, samples, nDSoundSegLen);
+        if(err != paNoError) goto error;
+    }
+    else
+    {
+        unsigned long frames = 0;
+        while ((frames = Pa_GetStreamWriteAvailable(stream)) >= nDSoundSegLen)
+        {
+            m1sdr_Update();
+
+            err = Pa_WriteStream(stream, samples, nDSoundSegLen);
+            if(err != paNoError) goto error;
+        }
+    }
+
+    return M1SDR_WAIT;
+
+error:
+    pa_error_handler();
+    return M1SDR_ERROR;
 }
 
 void m1sdr_PrintDevices(void)
 {
+    err = Pa_Initialize();
+    if (err != paNoError) goto error;
+
+    PaHostApiIndex hi = Pa_GetDefaultHostApi();
+    if (hi < 0) goto error;
+
+    const PaHostApiInfo* info = Pa_GetHostApiInfo(hi);
+    printf("HostApi: %s\n", info->name);
+
+    for (int i=0; i<info->deviceCount; ++i)
+    {
+        PaDeviceIndex di = Pa_HostApiDeviceIndexToDeviceIndex(hi, i);
+        const PaDeviceInfo* device = Pa_GetDeviceInfo(di);
+        printf("Device: %s %s\n", device->name,
+            di == info->defaultOutputDevice ? "[DEFAULT]" : "");
+    }
+
+    Pa_Terminate();
+    return;
+error:
+    pa_error_handler();
+    return;
+}
+
+/** On error returns paNoDevice */
+static PaDeviceIndex pa_get_device_index(char *device) {
+    PaHostApiIndex hi = Pa_GetDefaultHostApi();
+    if (hi < 0) return paNoDevice;
+
+    const PaHostApiInfo* info = Pa_GetHostApiInfo(hi);
+
+    for (int i=0; i<info->deviceCount; ++i)
+    {
+        PaDeviceIndex di = Pa_HostApiDeviceIndexToDeviceIndex(hi, i);
+        const PaDeviceInfo* thisDevice = Pa_GetDeviceInfo(di);
+        if (strcmp(thisDevice->name, device) == 0)
+            return di;
+    }
+
+    return paNoDevice;
 }
 
 // m1sdr_Init - inits the output device and our global state
 INT16 m1sdr_Init(char *device, int sample_rate)
 {
-	hw_present = 0;
+    hw_present = 0;
+    nDSoundSegLen = sample_rate / 60;
 
-	nDSoundSegLen = sample_rate / 60; // 44100 / 60 = 735
+    memset(samples, 0, sizeof(samples));
 
-	memset(samples, 0, sizeof(samples));	// zero out samples
+    // PortAudio init
+    err = Pa_Initialize();
+    if (err != paNoError) goto error;
 
-	// PortAudio init
-	err = Pa_Initialize();
-    if(err != paNoError) goto error;
+    // Open an audio I/O stream
+    if (!device)
+    {
+        err = Pa_OpenDefaultStream(&stream,
+                            0, // no input channels
+                            2, // stereo output
+                            paInt16, // 16 bit digital samples
+                            sample_rate,
+                            nDSoundSegLen, // frames per buffer
+                            NULL, // no callback, use blocking api
+                            NULL); // no callback, so no callback userData
+    }
+    else
+    {
+        PaStreamParameters outParams;
+        outParams.device = pa_get_device_index(device);
+        if (outParams.device == paNoDevice)
+        {
+            fprintf(stderr,"Error: Not a valid output device: %s.\n", device);
+            goto error;
+        }
+        outParams.channelCount = 2;
+        outParams.sampleFormat = paInt16;
+        outParams.suggestedLatency = Pa_GetDeviceInfo(outParams.device)->defaultLowOutputLatency;
+        outParams.hostApiSpecificStreamInfo = NULL;
 
-    /* Open an audio I/O stream. */
-    err = Pa_OpenDefaultStream(&stream,
-                                0,          /* no input channels */
-                                2,          /* stereo output */
-                                paInt16,    /* 16 bit digital output */
-                                sample_rate,
-                                nDSoundSegLen, /* frames per buffer (256?) */
-                                patestCallback,
-                                &data);
+        err = Pa_OpenStream(&stream,
+                            NULL,
+                            &outParams,
+                            sample_rate,
+                            nDSoundSegLen,
+                            paClipOff,
+                            NULL,
+                            NULL);
+    }
 
-	if(err != paNoError) goto error;
+    if (err != paNoError) goto error;
 
-	err = Pa_StartStream(stream);
-    if(err != paNoError) goto error;
+    err = Pa_StartStream(stream);
+    if (err != paNoError) goto error;
 
-	hw_present = 1;
-	(void) device;
-	return (1);
+    hw_present = 1;
+    return (1);
 error:
-    Pa_Terminate();
-    fprintf(stderr, "An error occurred while using the portaudio stream\n");
-    fprintf(stderr, "Error number: %d\n", err);
-    fprintf(stderr, "Error message: %s\n", Pa_GetErrorText(err));
+    pa_error_handler();
     return err;
 }
 
 void m1sdr_Exit(void)
 {
-	if (!hw_present) return;
+    if (!hw_present) return;
 
-	err = Pa_StopStream(stream);
-    if(err != paNoError) goto error;
+    err = Pa_StopStream(stream);
+    if (err != paNoError) goto error;
     err = Pa_CloseStream(stream);
-    if(err != paNoError) goto error;
+    if (err != paNoError) goto error;
     Pa_Terminate();
 error:
-    Pa_Terminate();
-    fprintf(stderr, "An error occurred while using the portaudio stream\n");
-    fprintf(stderr, "Error number: %d\n", err);
-    fprintf(stderr, "Error message: %s\n", Pa_GetErrorText(err));
+    pa_error_handler();
 }
 
 // unused stubs for this driver, but the Win32 driver needs them
@@ -143,10 +204,10 @@ void m1sdr_PlayStop(void)
 
 void m1sdr_FlushAudio(void)
 {
-	memset(samples, 0, nDSoundSegLen * 4);
+    memset(samples, 0, nDSoundSegLen * 4);
 }
 
 void m1sdr_SetNoWait(int nw)
 {
-	(void)nw;
+    nowait = nw;
 }

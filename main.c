@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <libgen.h>
 
 #include "argparse/argparse.h"
 #include "ao.h"
@@ -41,6 +42,8 @@
 static uint32 type;
 static wavedump_t song_dump;
 volatile ao_bool ao_song_done;
+
+static char *input_dir = NULL;
 
 static struct
 {
@@ -109,12 +112,30 @@ int ao_get_lib(const char *filename, uint8 **buffer, uint64 *length)
 	uint32 size;
 	FILE *auxfile;
 
-	auxfile = ao_fopen(filename, "rb");
-	if (!auxfile)
+	// append input_dir to filename to form absolute path
+	char *abs_path = malloc(strlen(input_dir) + strlen(filename) + 2);
+	if (!abs_path)
 	{
-		printf("Unable to find auxiliary file %s\n", filename);
+		fprintf(stderr, "Malloc failed\n");
 		return AO_FAIL;
 	}
+	int len = strlen(input_dir);
+	memcpy(abs_path, input_dir, len);
+	abs_path[len++] = '/'; // TODO: Will this work on Windows?
+	memcpy(abs_path + len, filename, strlen(filename));
+	len += strlen(filename);
+	abs_path[len++] = '\0';
+
+	printf("Loading library... %s\n", abs_path);
+	auxfile = ao_fopen(abs_path, "rb");
+	if (!auxfile)
+	{
+		printf("Unable to find auxiliary file %s\n", abs_path);
+		free(abs_path);
+		return AO_FAIL;
+	}
+
+	free(abs_path);
 
 	fseek(auxfile, 0, SEEK_END);
 	size = ftell(auxfile);
@@ -193,12 +214,10 @@ int main(int argc, const char *argv[])
 	struct argparse_option options[] =
 	{
 		OPT_HELP(),
-		#ifdef WIN32
 		OPT_STRING('d', "device", &device, "name of the playback device"),
 			#ifndef NOPLAY
 		OPT_BOOLEAN('\0', "list-devices", &list_devices, "list all available playback devices that can be passed to -d"),
 			#endif
-		#endif
 		#ifndef NOGUI
 		OPT_BOOLEAN('g', "nogui", &nogui, "don't show the debugging GUI"),
 		#endif
@@ -245,6 +264,11 @@ int main(int argc, const char *argv[])
 		printf("ERROR: could not open file %s\n", argv[0]);
 		return -1;
 	}
+
+	// making a copy in case dirname modifies the original
+	char *filename_dup = strdup(argv[0]);
+	input_dir = dirname(filename_dup);
+	free(filename_dup);
 
 	if(!nosamples)
 	{
