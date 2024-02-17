@@ -266,9 +266,9 @@ int main(int argc, const char *argv[])
 	}
 
 	// making a copy in case dirname modifies the original
-	char *filename_dup = strdup(argv[0]);
-	input_dir = dirname(filename_dup);
-	free(filename_dup);
+	char *path_dup = strdup(argv[0]);
+	input_dir = dirname(path_dup);
+	free(path_dup);
 
 	if(!nosamples)
 	{

@@ -33,42 +33,6 @@ CFLAGS += -c -DPATH_MAX=1024 -DHAS_PSXCPU=1 -I. -I.. -Ieng_ssf -Ieng_qsf  -Ieng_
 # set for little-endian, make "0" for big-endian
 CFLAGS += -DLSB_FIRST=1
 
-ifeq ($(OS),Windows_NT)
-	#Windows
-	LDFLAGS += -Wl,--gc-sections
-	CFLAGS += -DWIN32_UTF8_NO_API
-    OBJS += dsnd.o win32_utf8/win32_utf8_build_static.o win32_utf8/entry_main.o
-    LIBS += -ldsound -ldxguid
-    # Windows DLLs referenced by win32_utf8, which are hopefully eliminated by
-    # -gc-sections one day…
-    LIBS += -lcomdlg32 -lgdi32 -lole32 -lpsapi -lshlwapi -lversion -lwininet
-    ifndef NOGUI
-        # Windows OpenGL DLL, referenced by ImGui
-        LIBS += -lopengl32
-    endif
-else
-    UNAME_S := $(shell uname -s)
-    ifeq ($(UNAME_S),Darwin)
-		#macOS
-        LDFLAGS += -Wl,-dead_strip
-	else
-		#Linux
-		LDFLAGS += -Wl,--gc-sections
-    endif
-
-    ifeq ($(shell uname -m),x86_64)
-        CFLAGS += -DLONG_IS_64BIT=1
-    endif
-
-    ifneq (,$(wildcard /dev/dsp))
-        $(info Using OSS via /dev/dsp for playback.)
-        OBJS += oss.o
-    else
-        $(info /dev/dsp not found. Using Port Audio.)
-		OBJS += paudio.o
-    endif
-endif
-
 MACHINE = $(shell $(CC) -dumpmachine)
 
 EXE  = aosdk-$(MACHINE)
@@ -102,46 +66,69 @@ OBJS += zlib/zutil.o zlib/inflate.o zlib/infback.o zlib/inftrees.o zlib/inffast.
 
 # ImGui
 ifndef NOGUI
-	PKG_CONFIG = $(shell which pkg-config 2>/dev/null)
-	ifeq ($(PKG_CONFIG),)
-		$(error pkg-config not found)
-	endif
+    PKG_CONFIG = $(shell which pkg-config 2>/dev/null)
+    ifeq ($(PKG_CONFIG),)
+        $(error pkg-config not found)
+    endif
 
-	GLFW3_LIBS = $(shell $(PKG_CONFIG) --static --libs-only-l glfw3 2>/dev/null)
+    GLFW3_LIBS = $(shell $(PKG_CONFIG) --static --libs-only-l glfw3 2>/dev/null)
 
-	ifeq ($(GLFW3_LIBS),)
-		$(warning GLFW3 development files not installed, debug GUI can not be built.)
-		$(error To build without the debug GUI, set NOGUI=1 before calling make)
-	endif
+    ifeq ($(GLFW3_LIBS),)
+        $(warning GLFW3 development files not installed, debug GUI can not be built.)
+        $(error To build without the debug GUI, set NOGUI=1 before calling make)
+    endif
 
-	CFLAGS += -Iimgui/ -DIMGUI_INCLUDE_IMGUI_USER_H -DIMGUI_INCLUDE_IMGUI_USER_INL
-	LIBS += $(GLFW3_LIBS) -lstdc++
+    CFLAGS += -Iimgui/ -DIMGUI_INCLUDE_IMGUI_USER_H -DIMGUI_INCLUDE_IMGUI_USER_INL
+    LIBS += $(GLFW3_LIBS) -lstdc++
 
-	OBJS += imgui/imgui.o imgui/imgui_draw.o imgui/imgui_demo.o imgui/examples/opengl_example/imgui_impl_glfw.o
-	OBJS += eng_dsf/dc_debug.o
-	OBJS += debug.o
+    OBJS += imgui/imgui.o imgui/imgui_draw.o imgui/imgui_demo.o imgui/examples/opengl_example/imgui_impl_glfw.o
+    OBJS += eng_dsf/dc_debug.o
+    OBJS += debug.o
 endif
 
-# linking and final options
+# port objects & flags
 ifeq ($(OS),Windows_NT)
-	LIBS += -limm32
+    #Windows
+    LDFLAGS += -Wl,--gc-sections
+    CFLAGS += -DWIN32_UTF8_NO_API
+    OBJS += dsnd.o win32_utf8/win32_utf8_build_static.o win32_utf8/entry_main.o
+    LIBS += -ldsound -ldxguid
+    LIBS += -limm32
+    # Windows DLLs referenced by win32_utf8, which are hopefully eliminated by
+    # -gc-sections one day…
+    LIBS += -lcomdlg32 -lgdi32 -lole32 -lpsapi -lshlwapi -lversion -lwininet
+    ifndef NOGUI
+        # Windows OpenGL DLL, referenced by ImGui
+        LIBS += -lopengl32
+    endif
 else
     CFLAGS += -DNOGUI
 
     UNAME_S := $(shell uname -s)
     ifeq ($(UNAME_S),Darwin)
-		#macOS
-		OBJS += paudio.o
-		STATIC_LIBS += libportaudio.a
-		CFLAGS += -Iportaudio/include
-		LDFLAGS += -framework CoreServices -framework CoreFoundation -framework AudioUnit \
-				   -framework AudioToolbox -framework CoreAudio
-	else
-		#Linux
-		LDFLAGS += -Wl,--gc-sections
+        #macOS
+        LDFLAGS += -Wl,-dead_strip
+        LDFLAGS += -framework CoreServices -framework CoreFoundation -framework AudioUnit \
+                   -framework AudioToolbox -framework CoreAudio
+    else
+        #Linux
+        LDFLAGS += -Wl,--gc-sections
+    endif
+
+    ifeq ($(shell uname -m),x86_64)
+        CFLAGS += -DLONG_IS_64BIT=1
+    endif
+
+    ifneq (,$(wildcard /dev/dsp))
+        $(info Using OSS via /dev/dsp for playback.)
+        OBJS += oss.o
+    else
+        $(info /dev/dsp not found. Using Port Audio for playback.)
+        OBJS += paudio.o
+        STATIC_LIBS += libportaudio.a
+        CFLAGS += -Iportaudio/include
     endif
 endif
-
 
 MACHINE_OBJS = $(OBJS:%.o=obj/$(MACHINE)/%.o)
 MACHINE_STATIC_LIBS = $(STATIC_LIBS:%.a=libs/$(MACHINE)/%.a)
